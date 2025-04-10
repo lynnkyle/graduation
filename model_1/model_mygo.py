@@ -3,8 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 from mamba_ssm import Mamba, Mamba2
 from model_new import Tucker, ContrastiveLoss
-
-from fusion.fusion import BertLayer
+from fusion import BertLayer
 
 
 class MyGo(nn.Module):

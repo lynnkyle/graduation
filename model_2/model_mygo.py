@@ -1,10 +1,9 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
-from mamba_ssm import Mamba, Mamba2
+from mamba_ssm import Mamba
 from model_new import Tucker, ContrastiveLoss
 
-from fusion.fusion import BertLayer
+from model_1.fusion import BertLayer
 
 
 class MyGo(nn.Module):
