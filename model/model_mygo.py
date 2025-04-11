@@ -82,18 +82,14 @@ class MyGo(nn.Module):
         ent_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
                                                        dropout=dropout, batch_first=True)
         self.ent_encoder = nn.TransformerEncoder(ent_encoder_layer, num_layers=num_layer_enc_ent)
-        # [revise]
-        # self.ent_encoder = Mamba(d_model=str_dim, d_state=64, d_conv=4, expand=2)
 
         rel_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
                                                        dropout=dropout, batch_first=True)
         self.rel_encoder = nn.TransformerEncoder(rel_encoder_layer, num_layers=num_layer_enc_rel)
 
-        # decoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
-        #                                            dropout=dropout, batch_first=True)
-        # self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=num_layer_dec)
-        # [revise]
-        self.decoder = Mamba(d_model=str_dim, d_state=32, d_conv=4, expand=2)
+        decoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
+                                                   dropout=dropout, batch_first=True)
+        self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=num_layer_dec)
 
         self.contrastive = ContrastiveLoss()
         self.num_visual_token = visual_ent_mask.shape[1]
@@ -134,8 +130,8 @@ class MyGo(nn.Module):
         ent_seq = torch.cat([ent_token, rep_ent_str, rep_ent_visual, rep_ent_textual], dim=1)
 
         # [revise]
-        # ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)[:, 0]
-        ent_embs = self.ent_encoder(ent_seq)[:, 0]
+        # ent_embs = self.ent_encoder(ent_seq)[:, 0]
+        ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)[:, 0]
 
         rel_embs = self.str_drop(self.str_ln(self.rel_emb)).squeeze(1)
         return torch.cat([ent_embs, self.lp_token], dim=0), rel_embs
@@ -183,8 +179,8 @@ class MyGo(nn.Module):
         ent_seq = torch.cat([ent_token, rep_ent_str, rep_ent_visual_token, rep_ent_textual_token], dim=1)
 
         # [revise]
-        ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)  # [batch_size, 4, str_dim]
         # ent_embs = self.ent_encoder(ent_seq)  # [batch_size, 4, str_dim]
+        ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)  # [batch_size, 4, str_dim]
 
         emb_ent2 = torch.cat([ent_embs[:, 0], self.lp_token], dim=0)
         emb_ent3 = torch.cat([torch.mean(ent_embs, dim=1), self.lp_token], dim=0)

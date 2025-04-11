@@ -17,10 +17,17 @@ from fusion import BertLayer
 # print(y)
 
 # 3.Vision Transformer实验
-# 1).Conv2D
+# 1). Conv2D
 x = torch.randn(2, 3, 15, 15)
 conv = nn.Conv2d(3, 16, 3, stride=3)
 y = conv(x)
 print(y.shape)
 y = y.flatten(2)
 print(y.shape)
+# 2). Droppath
+x = torch.ones(2, 3, 2, 5)
+shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+print(shape)
+x = torch.rand(shape, dtype=x.dtype, device=x.device)
+print(x)
+print(0.1 + x)
