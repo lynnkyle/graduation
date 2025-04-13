@@ -1,7 +1,5 @@
-import argparse
 import torch
 from torch import nn
-from fusion import BertLayer
 
 # x = torch.randn(2, 32, 1024)
 #
@@ -31,3 +29,16 @@ print(shape)
 x = torch.rand(shape, dtype=x.dtype, device=x.device)
 print(x)
 print(0.1 + x)
+# 3). AdaptiveAvgPool
+# 1d
+x = torch.tensor([[[1, 2], [2, 3]], [[3, 4], [4, 5]], [[5, 6], [6, 7]]], dtype=torch.float)
+avg_pool = nn.AdaptiveAvgPool1d(1)
+y = avg_pool(x)
+print(y)
+# 2d
+x = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.float)
+avg_pool = nn.AdaptiveAvgPool2d(1)
+y = avg_pool(x)
+print(y.shape)
+y = y.flatten(-1)
+print(y.shape)

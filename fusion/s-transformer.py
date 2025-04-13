@@ -1,6 +1,11 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+import numpy as np
+from torchvision.models import SwinTransformer, VisionTransformer, ConvNeXt
+
+
+def window_partition():
 
 
 class PatchEmbed(nn.Module):
@@ -41,47 +46,114 @@ class PatchEmbed(nn.Module):
 class PatchMerging(nn.Module):
     def __init__(self, dim, norm_layer=nn.LayerNorm):
         super().__init__()
-        self.dim = dim
+        self.dim = dim  # number of input channel
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.norm = norm_layer(4 * dim)
 
     def forward(self, x, H, W):
         """
-        :param x:
-        :param H:
-        :param W:
-        :return:
+        :param x: [B,L,C]
+        :param H: L/W
+        :param W: L/H
+        :return:# [B, H/2 * W/2, 2C]
         """
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
-        x = x.view(B, H, W, C)
+        x = x.view(B, H, W, C)  # [B, H, W, C]
 
         # padding
         pad_input = (H % 2 == 1) or (W % 2 == 1)
         if pad_input:
             x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
 
-        x0 = x[:, 0::2, 0::2, :]
-        x1 = x[:, 1::2, 0::2, :]
-        x2 = x[:, 0::2, 1::2, :]
-        x3 = x[:, 1::2, 1::2, :]
+        x0 = x[:, 0::2, 0::2, :]  # [B, H/2, W/2, C]
+        x1 = x[:, 1::2, 0::2, :]  # [B, H/2, W/2, C]
+        x2 = x[:, 0::2, 1::2, :]  # [B, H/2, W/2, C]
+        x3 = x[:, 1::2, 1::2, :]  # [B, H/2, W/2, C]
 
-        x = torch.cat((x0, x1, x2, x3), dim=-1)
-        x = x.view(B, -1, 4 * C)
-        x = self.norm(x)
-        x = self.reduction(x)
+        x = torch.cat((x0, x1, x2, x3), dim=-1)  # [B, H/2, W/2, 4C]
+        x = x.view(B, -1, 4 * C)  # [B, H/2 * W/2, 4C]
+        x = self.norm(x)  # [B, H/2 * W/2, 4C]
+        x = self.reduction(x)  # [B, H/2 * W/2, 2C]
         return x
 
 
-class BasicLayer(nn.Module):
-    def __init__(self):
+class SwinTransformerBlock(nn.Module):
+    def __init__(self, dim, num_heads, window_size=7, shift_size=0, mlp_ratio=4., qkv_bias=True, drop=0.,
+                 attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+
+    def forward(self, x):
         pass
+
+
+class BasicLayer(nn.Module):
+    """
+        A basic SwinTransformer layer for one stage = swim transformer block(W-MSA + SW-MSA) + patch merging layer
+    """
+
+    def __init__(self, dim, depth, num_heads, window_size, mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0.,
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
+        super().__init__()
+        self.dim = dim  # number of input channel
+        self.depth = depth
+        self.window_size = window_size
+        self.use_checkpoint = use_checkpoint
+        self.shift_size = window_size // 2
+
+        # swim transformer block
+        self.blocks = nn.ModuleList([
+            SwinTransformerBlock(dim=dim, num_heads=num_heads, window_size=window_size,
+                                 shift_size=0 if i % 2 == 0 else self.shift_size, mlp_ratio=mlp_ratio,
+                                 qkv_bias=qkv_bias, drop=drop, attn_drop=attn_drop,
+                                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
+                                 norm_layer=norm_layer)
+            for i in range(depth)])
+
+        # patch merging layer
+        if downsample is not None:
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
+        else:
+            self.downsample = None
+
+    def create_mask(self, x, H, W):
+        """
+        为 SW-MSA 计算注意力掩码
+        :param x:
+        :param H:
+        :param W:
+        :return:
+        """
+        # padding
+        Hp = int(np.ceil(H / self.window_size) * self.window_size)
+        Wp = int(np.ceil(W / self.window_size) * self.window_size)
+        # mask
+        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)
+        h_slices = (slice(0, -self.window_size),
+                    slice(-self.window_size, -self.shift_size),
+                    slice(-self.shift_size, None))
+        w_slices = (slice(0, -self.window_size),
+                    slice(-self.window_size, -self.shift_size),
+                    slice(-self.shift_size, None))
+        cnt = 0
+        for h in h_slices:
+            for w in w_slices:
+                img_mask[:, h, w, :] = cnt
+                cnt += 1
+        masked_windows = window_partition()
 
     def forward(self, x, H, W):
-        pass
+        attn_mask = self.create_mask(x, H, W)  # [nW, Mh * Mw, Mh * Mw]
+        for blk in self.blocks:
+            blk.H, blk.W = H, W
+            x = blk(x, attn_mask)
+        if self.downsample is not None:
+            x = self.downsample(x)
+            H, W = (H + 1) // 2, (W + 1) // 2  # 由于H,W是奇数时, 需要进行Padding H = H + 1 W = W + 1
+        return x, H, W
 
 
-class SwinTransformerBlock(nn.Module):
+class SwinTransformer(nn.Module):
     def __init__(self, patch_size=4, in_channels=3, num_classes=1000, embed_dim=96, depths=(2, 2, 6, 2),
                  num_heads=(3, 6, 12, 24), window_size=7, mlp_ratio=4., qkv_bias=True, drop_rate=0.,
                  attn_drop_rate=0., drop_path_rate=0.1, patch_norm=True, norm_layer=nn.LayerNorm,
@@ -114,8 +186,21 @@ class SwinTransformerBlock(nn.Module):
                                use_checkpoint=use_checkpoint)
             self.layers.append(layer)
 
+        self.norm = norm_layer(self.num_features)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 常用于卷积神经网络最后阶段,把每个通道的特征图变成 1×1
+        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.apply(self._init_weights)
+
     def forward(self, x):
-        pass
+        x, H, W = self.patch_embed(x)  # [B, L=H / patch_size * W / patch_size, C]
+        x = self.pos_drop(x)
+        for layer in self.layers:
+            x, H, W = layer(x, H, W)
+        x = self.norm(x)  # [B, L, C]
+        x = self.avg_pool(x.transpose(1, 2))  # [B, C, 1] -> [B, C]
+        x = torch.flatten(x, 1)
+        x = self.head(x)
+        return x
 
 
 if __name__ == '__main__':
