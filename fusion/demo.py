@@ -1,7 +1,7 @@
-import argparse
+from functools import partial
+
 import torch
 from torch import nn
-from fusion import BertLayer
 
 # x = torch.randn(2, 32, 1024)
 #
@@ -24,6 +24,7 @@ y = conv(x)
 print(y.shape)
 y = y.flatten(2)
 print(y.shape)
+
 # 2). Droppath
 x = torch.ones(2, 3, 2, 5)
 shape = (x.shape[0],) + (1,) * (x.ndim - 1)
@@ -31,3 +32,22 @@ print(shape)
 x = torch.rand(shape, dtype=x.dtype, device=x.device)
 print(x)
 print(0.1 + x)
+
+
+# 3). partial
+def add(a, b, c):
+    return a + b + c
+
+
+add_1 = partial(add, 6)
+print(add_1(3, 4))
+
+# 4). sequential
+model = nn.Sequential(*[nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 1), nn.ReLU()])
+print(model)
+
+# 5). expand
+cls = torch.Tensor(size=(1, 1, 768))
+x = torch.Tensor(size=(64, 196, 768))
+y = cls.expand(x.shape[0], -1, -1)
+print(y.shape)

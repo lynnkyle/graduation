@@ -122,8 +122,8 @@ def train_one_epoch(model, optimizer):
         loss = loss_fn(score, label.cuda())
 
         # [revised]
-        # if args.mu != 0:
-        #     loss += args.mu * model.contrastive_loss_finegrained(ent_embs)
+        if args.mu != 0:
+            loss += args.mu * model.contrastive_loss_finegrained(ent_embs)
 
         total_loss += loss.item()
         optimizer.zero_grad()
