@@ -48,3 +48,25 @@ x = 72
 y = 10
 print(x / y)
 print(x // y)
+
+
+# drop_path
+def drop_path(x, drop_prob=0., training=False):
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)  # 取值范围是[keep_dim, 1 + keep_dim)
+    # random_tensor = random_tensor.floor() # Tensor非原地修改
+    random_tensor.floor_()  # Tensor原地修改
+    x = x.div(keep_prob) * random_tensor
+    return x
+
+
+x = torch.randn(4, 3, 5, 5)
+print(drop_path(x, 0.2, True))
+
+# torch.roll
+x = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 0]])
+x = torch.roll(x, shifts=-2, dims=-1)
+print(x)

@@ -1,3 +1,10 @@
+"""
+    2021 ICCV Paper
+    PatchMerging模块: 高、宽缩小为原来的一半, 深度翻倍
+    W-MSA模块-(MSA模块): 目的是为了减少计算量, 缺点是窗口之间无法进行信息交互
+    Shifted Window: 实现不同window之间的信息交互, 使用Masked MSA机制(l层是W-MSA模块, l+1层是Shifted Window模块)
+    Relative position bias: Attention(Q,K,V) = SoftMax(QK^t / d**0.5 + B)V
+"""
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -5,12 +12,13 @@ import numpy as np
 from torchvision.models import SwinTransformer, VisionTransformer, ConvNeXt
 
 
-def droppath(x, drop_prob=0., training=False):
-    if drop_prob == 0. or training == False:
+def drop_path(x, drop_prob=0., training=False):
+    if drop_prob == 0. or not training:
         return x
     keep_prob = 1 - drop_prob
-    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # 掩码针对样本级别, 每个样本都会有一个对立的随机数
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)  # 取值范围是[keep_dim, 1 + keep_dim)
+    random_tensor.floor_()
     output = x.div(keep_prob) * random_tensor
     return output
 
@@ -47,11 +55,14 @@ def window_reverse(windows, window_size, H, W):
 
 
 class DropPath(nn.Module):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, drop_prob=None, training=False):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+        self.training = training
 
     def forward(self, x):
-        pass
+        x = drop_path(x, self.drop_prob, self.training)
+        return x
 
 
 class PatchEmbed(nn.Module):
@@ -132,11 +143,31 @@ class WindowAttention(nn.Module):
         pass
 
 
+class Mlp(nn.Module):
+    def __init__(self, in_dim, hidden_dim=None, out_dim=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        hidden_dim = hidden_dim or in_dim
+        out_dim = out_dim or in_dim
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(drop)
+        self.fc2 = nn.Linear(hidden_dim, out_dim)
+        self.drop2 = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
+
+
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, window_size=7, shift_size=0, mlp_ratio=4., qkv_bias=True, drop=0.,
                  attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
-        self.dim = dim
+        self.dim = dim  # number of input channel
         self.num_heads = num_heads
         self.window_size = window_size
         self.shift_size = shift_size
@@ -145,11 +176,68 @@ class SwinTransformerBlock(nn.Module):
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention()
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_dim=dim, hidden_dim=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-        self.drop_path = DropPath()
+    def forward(self, x, attn_mask):
+        """
+        :param x: [B, L, C] PatchMerging之后
+        :param attn_mask:
+        :return:
+        """
+        H, W = self.H, self.W
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
 
-    def forward(self, x):
-        pass
+        shortcut = x
+        x = self.norm1(x)
+        x = x.view(B, H, W, C)  # [B, H, W, C]
+
+        # 把feature_map给pad到window_size的整数倍
+        pad_l = pad_t = 0
+        pad_r = (self.window_size - W % self.window_size) % self.window_size
+        pad_b = (self.window_size - H % self.window_size) % self.window_size
+        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+        _, Hp, Wp, _ = x.shape
+
+        # cyclic shift
+        if self.shift_size > 0:
+            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+        else:
+            shifted_x = x
+            attn_mask = None
+
+        # partition windows(Patch ==> Window)
+        x_windows = window_partition(shifted_x, self.window_size)
+        # [B * Hp // window_size * Wp // window_size, window_size, window_size, C]
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
+        # [B * Hp // window_size * Wp // window_size, window_size * window_size, C]
+
+        # W-MSA / SW-MSA
+        attn_windows = self.attn(x_windows, attn_mask)
+        # [B * Hp // window_size * Wp // window_size, window_size * window_size, C]
+
+        # merge windows
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        # [B * Hp // window_size * Wp // window_size, window_size, window_size, C]
+        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)
+        # [B, Hp, Wp, C]
+
+        # reverse cyclic shift
+        if self.shift_size > 0:
+            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        else:
+            x = shifted_x
+
+        if pad_r > 0 or pad_b > 0:
+            x = x[:, :H, :W, :].contiguous()
+
+        # FFN
+        x = x.view(B, H * W, C)
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        return x
 
 
 class BasicLayer(nn.Module):
@@ -215,6 +303,12 @@ class BasicLayer(nn.Module):
         return attn_mask
 
     def forward(self, x, H, W):
+        """
+        :param x:
+        :param H:
+        :param W:
+        :return:
+        """
         attn_mask = self.create_mask(x, H, W)  # [nW, Mh * Mw, Mh * Mw]
         for blk in self.blocks:
             blk.H, blk.W = H, W
@@ -264,6 +358,10 @@ class SwinTransformer(nn.Module):
         self.apply(self._init_weights)
 
     def forward(self, x):
+        """
+        :param x: [B, C, H, W]
+        :return: [B, num_classes]
+        """
         x, H, W = self.patch_embed(x)  # [B, L=H / patch_size * W / patch_size, C]
         x = self.pos_drop(x)
         for layer in self.layers:
@@ -271,7 +369,7 @@ class SwinTransformer(nn.Module):
         x = self.norm(x)  # [B, L, C]
         x = self.avg_pool(x.transpose(1, 2))  # [B, C, 1] -> [B, C]
         x = torch.flatten(x, 1)
-        x = self.head(x)
+        x = self.head(x)  # [B, num_classes]
         return x
 
 
