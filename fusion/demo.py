@@ -42,3 +42,9 @@ y = avg_pool(x)
 print(y.shape)
 y = y.flatten(-1)
 print(y.shape)
+
+# 4.Swim Transformer实验
+x = 72
+y = 10
+print(x / y)
+print(x // y)

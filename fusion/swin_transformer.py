@@ -5,13 +5,53 @@ import numpy as np
 from torchvision.models import SwinTransformer, VisionTransformer, ConvNeXt
 
 
+def droppath(x, drop_prob=0., training=False):
+    if drop_prob == 0. or training == False:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    output = x.div(keep_prob) * random_tensor
+    return output
+
+
 def window_partition(x, window_size):
-    B, H, W, C = x.shape
-    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
-    # [B, H//m, m, W//m, m, C]
+    """
+    将img_mask划分成一个个没有重叠的window
+    :param x:[B, H, W, C]
+    :param window_size:
+    :return:[B * H // window_size * W // window_size, window_size, window_size, C]
+    """
+    B, H, W, C = x.size()
+    x = x.view(-1, H // window_size, window_size, W // window_size, window_size, C)
+    # [B, H // window_size, window_size, W // window_size, window_size, C]
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    # [B, H//m, W//m, m, m, C] -> [B * H//m * W//m, m, m, C]
+    # [B, H // window_size, W // window_size, window_size, window_size, C] -> [B * H // window_size * W // window_size, window_size, window_size, C]
     return windows
+
+
+def window_reverse(windows, window_size, H, W):
+    """
+    将一个个没有重叠的window还原成img_mask
+    :param x:[B * H // window_size * W // window_size, window_size, window_size, C]
+    :param window_size:
+    :return:[B, H, W, C]
+    """
+
+    B = int(windows.shape[0] / (H / window_size * W / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    # [B, H // window_size, W // window_size, window_size, window_size, C]
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    # [B, H // window_size, window_size, W // window_size, window_size, C] -> [B, H, W, C]
+    return x
+
+
+class DropPath(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        pass
 
 
 class PatchEmbed(nn.Module):
@@ -84,10 +124,29 @@ class PatchMerging(nn.Module):
         return x
 
 
+class WindowAttention(nn.Module):
+    def __init__(self):
+        pass
+
+    def forward(self, x):
+        pass
+
+
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, window_size=7, shift_size=0, mlp_ratio=4., qkv_bias=True, drop=0.,
                  attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
+
+        self.norm1 = norm_layer(dim)
+        self.attn = WindowAttention()
+
+        self.drop_path = DropPath()
 
     def forward(self, x):
         pass
@@ -146,7 +205,14 @@ class BasicLayer(nn.Module):
             for w in w_slices:
                 img_mask[:, h, w, :] = cnt
                 cnt += 1
-        masked_windows = window_partition(img_mask, self.window_size)  # []
+        masked_windows = window_partition(img_mask, self.window_size)
+        # [B * H // window_size * W // window_size, window_size, window_size, C] -> [1 * num_window, window_size, window_size, 1]
+        masked_windows = masked_windows.view(-1, self.window_size * self.window_size)
+        # [num_window, window_size * window_size]
+        attn_mask = masked_windows.unsqueeze(1) - masked_windows.unsqueeze(2)
+        # [num_window, 1, window_size * window_size] - [num_window, window_size * window_size, 1]
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        return attn_mask
 
     def forward(self, x, H, W):
         attn_mask = self.create_mask(x, H, W)  # [nW, Mh * Mw, Mh * Mw]
