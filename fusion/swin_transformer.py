@@ -163,6 +163,57 @@ class Mlp(nn.Module):
         return x
 
 
+class WindowAttention(nn.Module):
+    """
+        WMSA MSA
+    """
+
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.dim = dim  # number of input channel
+        self.window_size = window_size
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        # relative_position_bias_table
+        # relative_position_bias_table是从relative_position_index到relative_position_bias的映射
+        # 行索引的范围 [-M+1, M-1] 列索引的范围 [-M+1, M-1]
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
+        )
+
+        # relative_position_bias_index
+        coords_h = torch.arange(self.window_size[0])
+        coords_w = torch.arange(self.window_size[1])
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij'))  # [2, Mh, Mw]
+        coords_flatten = torch.flatten(coords, 1)  # [2, Mh * Mw]
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        # [2, Mh * Mw, 1] - [2, 1, Mh * Mw] ==> [2, Mh * Mw, Mh * Mw]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # [Mh * Mw, Mh * Mw, 2]
+        relative_coords[:, :, 0] += self.window_size[0] - 1
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = torch.sum(relative_coords, dim=-1)
+        self.register_buffer('relative_position_index', relative_position_index)
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        """
+        :param x:
+        :return:
+        """
+        B, N, C = x.shape
+        qkv = self.qkv(x)
+
+
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, window_size=7, shift_size=0, mlp_ratio=4., qkv_bias=True, drop=0.,
                  attn_drop=0., drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):

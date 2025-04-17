@@ -70,3 +70,11 @@ print(drop_path(x, 0.2, True))
 x = torch.tensor([[1, 2, 3, 4, 5], [6, 7, 8, 9, 0]])
 x = torch.roll(x, shifts=-2, dims=-1)
 print(x)
+
+# torch.meshgrid
+x = torch.arange(4)
+y = torch.arange(4)
+coords = torch.stack(torch.meshgrid([x, y], indexing='ij'))  # [2, Mh, Mw]
+print(coords)
+coords_flatten = torch.flatten(coords, 1)
+print(coords_flatten)
