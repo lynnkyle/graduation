@@ -78,3 +78,11 @@ coords = torch.stack(torch.meshgrid([x, y], indexing='ij'))  # [2, Mh, Mw]
 print(coords)
 coords_flatten = torch.flatten(coords, 1)
 print(coords_flatten)
+
+# torch.unbind
+x = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 6, 7, 8])
+y = x.reshape(3, -1)
+a, b, c = y
+print(a, b, c)
+d, e, f = y.unbind(0)
+print(d, e, f)

@@ -5,6 +5,7 @@
     Shifted Window: 实现不同window之间的信息交互, 使用Masked MSA机制(l层是W-MSA模块, l+1层是Shifted Window模块)
     Relative position bias: Attention(Q,K,V) = SoftMax(QK^t / d**0.5 + B)V
 """
+import random
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -34,7 +35,7 @@ def window_partition(x, window_size):
     x = x.view(-1, H // window_size, window_size, W // window_size, window_size, C)
     # [B, H // window_size, window_size, W // window_size, window_size, C]
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    # [B, H // window_size, W // window_size, window_size, window_size, C] -> [B * H // window_size * W // window_size, window_size, window_size, C]
+    # [B, H // window_size, W // window_size, window_size, window_size, C] => [B * H // window_size * W // window_size, window_size, window_size, C]
     return windows
 
 
@@ -50,7 +51,7 @@ def window_reverse(windows, window_size, H, W):
     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     # [B, H // window_size, W // window_size, window_size, window_size, C]
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
-    # [B, H // window_size, window_size, W // window_size, window_size, C] -> [B, H, W, C]
+    # [B, H // window_size, window_size, W // window_size, window_size, C] => [B, H, W, C]
     return x
 
 
@@ -95,7 +96,7 @@ class PatchEmbed(nn.Module):
         B, C, H, W = x.shape
         # H = H / 4, W = W / 4
         x = x.flatten(2).permute(0, 2, 1)
-        # [B, C, H, W] -> [B, H / patch_size * W / patch_size, C]
+        # [B, C, H, W] => [B, H / patch_size * W / patch_size, C]
         x = self.norm(x)
         return x, H, W
 
@@ -133,14 +134,6 @@ class PatchMerging(nn.Module):
         x = self.norm(x)  # [B, H/2 * W/2, 4C]
         x = self.reduction(x)  # [B, H/2 * W/2, 2C]
         return x
-
-
-class WindowAttention(nn.Module):
-    def __init__(self):
-        pass
-
-    def forward(self, x):
-        pass
 
 
 class Mlp(nn.Module):
@@ -189,12 +182,12 @@ class WindowAttention(nn.Module):
         coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij'))  # [2, Mh, Mw]
         coords_flatten = torch.flatten(coords, 1)  # [2, Mh * Mw]
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
-        # [2, Mh * Mw, 1] - [2, 1, Mh * Mw] ==> [2, Mh * Mw, Mh * Mw]
+        # [2, Mh * Mw, 1] - [2, 1, Mh * Mw] => [2, Mh * Mw, Mh * Mw]
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # [Mh * Mw, Mh * Mw, 2]
         relative_coords[:, :, 0] += self.window_size[0] - 1
         relative_coords[:, :, 1] += self.window_size[1] - 1
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
-        relative_position_index = torch.sum(relative_coords, dim=-1)
+        relative_position_index = torch.sum(relative_coords, dim=-1)  # [Mh * Mw, Mh * Mw]
         self.register_buffer('relative_position_index', relative_position_index)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -205,13 +198,43 @@ class WindowAttention(nn.Module):
         nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         """
-        :param x:
+        :param x: [B * num_windows, window_size * window_size, C] => [B * Hp // window_size * Wp // window_size, window_size * window_size, C]
+        :param mask: []
         :return:
         """
-        B, N, C = x.shape
-        qkv = self.qkv(x)
+        B_, N, C = x.shape
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        # [3, B_, num_heads, window_size * window_size, C // num_heads]
+        q, k, v = qkv.unbind(0)
+        # q, k, v = qkv[0], qkv[1], qkv[2]
+        # [B_, num_heads, window_size * window_size, C // num_heads]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        # [B_, num_heads, window_size * window_size, window_size * window_size]
+        relative_position_bias = (self.relative_position_bias_table[self.relative_position_index.view(-1)]
+                                  .view(self.window_size[0] * self.window_size[1],
+                                        self.window_size[0] * self.window_size[1],
+                                        -1))
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+        # [1, window_size * window_size, window_size * window_size] => [num_head, window_size * window_size, window_size * window_size]
+        attn = attn + relative_position_bias.unsqueeze(0)
+        # [B_, num_heads, window_size * window_size, window_size * window_size]
+        if mask is not None:
+            # mask: [num_windows, window_size * window_size, window_size * window_size]
+            nW = mask.shape[0]
+            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            attn = attn.view(-1, self.num_heads, N, N)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        # [B_, num_heads, window_size * window_size, C // num_heads] => [B_, window_size * window_size, C]
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 
 class SwinTransformerBlock(nn.Module):
@@ -226,7 +249,8 @@ class SwinTransformerBlock(nn.Module):
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention()
+        self.attn = WindowAttention(dim=dim, window_size=(window_size, window_size), num_heads=num_heads,
+                                    qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -260,7 +284,7 @@ class SwinTransformerBlock(nn.Module):
             shifted_x = x
             attn_mask = None
 
-        # partition windows(Patch ==> Window)
+        # partition windows(Patch => Window)
         x_windows = window_partition(shifted_x, self.window_size)
         # [B * Hp // window_size * Wp // window_size, window_size, window_size, C]
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
@@ -345,12 +369,13 @@ class BasicLayer(nn.Module):
                 img_mask[:, h, w, :] = cnt
                 cnt += 1
         masked_windows = window_partition(img_mask, self.window_size)
-        # [B * H // window_size * W // window_size, window_size, window_size, C] -> [1 * num_window, window_size, window_size, 1]
+        # [B * H // window_size * W // window_size, window_size, window_size, C] => [1 * num_window, window_size, window_size, 1]
         masked_windows = masked_windows.view(-1, self.window_size * self.window_size)
         # [num_window, window_size * window_size]
         attn_mask = masked_windows.unsqueeze(1) - masked_windows.unsqueeze(2)
         # [num_window, 1, window_size * window_size] - [num_window, window_size * window_size, 1]
         attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        # [num_window, window_size * window_size, window_size * window_size]
         return attn_mask
 
     def forward(self, x, H, W):
@@ -365,7 +390,7 @@ class BasicLayer(nn.Module):
             blk.H, blk.W = H, W
             x = blk(x, attn_mask)
         if self.downsample is not None:
-            x = self.downsample(x)
+            x = self.downsample(x, H, W)
             H, W = (H + 1) // 2, (W + 1) // 2  # 由于H,W是奇数时, 需要进行Padding H = H + 1 W = W + 1
         return x, H, W
 
@@ -404,9 +429,18 @@ class SwinTransformer(nn.Module):
             self.layers.append(layer)
 
         self.norm = norm_layer(self.num_features)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # 常用于卷积神经网络最后阶段,把每个通道的特征图变成 1×1
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)  # 常用于卷积神经网络最后阶段,把每个通道的特征图变成 1×1
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
         self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x):
         """
@@ -418,17 +452,33 @@ class SwinTransformer(nn.Module):
         for layer in self.layers:
             x, H, W = layer(x, H, W)
         x = self.norm(x)  # [B, L, C]
-        x = self.avg_pool(x.transpose(1, 2))  # [B, C, 1] -> [B, C]
+        x = self.avg_pool(x.transpose(1, 2))  # [B, C, 1] => [B, C]
         x = torch.flatten(x, 1)
         x = self.head(x)  # [B, num_classes]
         return x
 
 
+"""
+    代码可复现
+"""
+random.seed(0)
+np.random.seed(0)
+torch.manual_seed(0)
+# torch.set_num_threads(8)
+torch.cuda.manual_seed(0)
+torch.cuda.manual_seed_all(0)
+torch.cuda.empty_cache()
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 if __name__ == '__main__':
-    x = torch.randn((2, 3, 224, 224))
-    patch_emb = PatchEmbed(patch_size=4, in_channels=3, embed_dim=96, norm_layer=None)
-    y = patch_emb(x)
-    print(y[0].shape)
-    patch_mergy = PatchMerging(dim=96, norm_layer=nn.LayerNorm)
-    z = patch_mergy(*y)
-    print(z.shape)
+    model = SwinTransformer(in_chans=3,
+                            patch_size=4,
+                            window_size=7,
+                            embed_dim=96,
+                            depths=(2, 2, 6, 2),
+                            num_heads=(3, 6, 12, 24),
+                            num_classes=5)
+    x = torch.randn(4, 3, 112, 112)
+    y = model(x)
+    print(y)
