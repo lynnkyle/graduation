@@ -86,3 +86,10 @@ a, b, c = y
 print(a, b, c)
 d, e, f = y.unbind(0)
 print(d, e, f)
+
+# torch.split
+matrix = torch.randn(12842, 768)
+chunk_size = 1024
+chunks = matrix.split(chunk_size, dim=0)
+print(len(chunks))
+print(len(chunks[12]))

@@ -161,13 +161,14 @@ def valid_eval_metric(valid_or_test):
     return mr, mrr, hit10, hit3, hit1
 
 
-model.eval()
-res1 = valid_eval_metric(valid_or_test=kg.valid)
-print(res1)
-res2 = valid_eval_metric(valid_or_test=kg.test)
-print(res2)
+# model.eval()
+# res1 = valid_eval_metric(valid_or_test=kg.valid)
+# print(res1)
+# res2 = valid_eval_metric(valid_or_test=kg.test)
+# print(res2)
 
-best_mrr = res2[1] or 0
+# best_mrr = res2[1] or 0
+best_mrr = 0
 best_result = None
 for epoch in range(args.num_epoch):
     loss = train_one_epoch(model, optimizer)
