@@ -33,10 +33,9 @@ class DropPath(nn.Module):
         Drop paths (Stochastic Depth) per sample pub.
     """
 
-    def __init__(self, drop_prob=0., training=False):
+    def __init__(self, drop_prob=0.):
         super().__init__()
         self.drop_prob = drop_prob
-        self.training = training
 
     def forward(self, x):
         return drop_path(x, self.drop_prob, self.training)
@@ -240,6 +239,7 @@ import numpy as np
 """
     代码可复现
 """
+torch.cuda.set_device(1)
 random.seed(0)
 np.random.seed(0)
 torch.manual_seed(0)

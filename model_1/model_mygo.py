@@ -1,10 +1,7 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
-from mamba_ssm import Mamba, Mamba2
 from model_new import Tucker, ContrastiveLoss
-from fusion import BertLayer
-
+import numpy as np
 
 class MyGo(nn.Module):
     def __init__(self, num_ent, num_rel, str_dim,
@@ -15,12 +12,11 @@ class MyGo(nn.Module):
                  num_layer_enc_rel, num_layer_dec,
                  dropout=0.1, str_dropout=0.6,
                  visual_dropout=0.1, textual_dropout=0.1,
-                 score_function=None, args=None):
+                 score_function=None):
         super(MyGo, self).__init__()
         self.num_ent = num_ent
         self.num_rel = num_rel
         self.str_dim = str_dim
-        self.args = args
         if visual_tokenizer == 'beit':
             visual_tokens = torch.load("tokens/visual.pth")
         elif visual_tokenizer == 'vggan':
@@ -81,37 +77,15 @@ class MyGo(nn.Module):
         self.proj_ent_visual = nn.Linear(self.visual_dim, self.str_dim)
         self.proj_ent_textual = nn.Linear(self.textual_dim, self.str_dim)
 
-        if args.ent_fusion == 'Transformer':
-            ent_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
-                                                           dropout=dropout, batch_first=True)
-            self.ent_encoder = nn.TransformerEncoder(ent_encoder_layer, num_layers=num_layer_enc_ent)
-        elif args.ent_fusion == 'Mamba':
-            # [revise_1]
-            self.ent_encoder = Mamba(d_model=str_dim, d_state=64, d_conv=4, expand=2)
-        elif args.ent_fusion == 'BertLayer':
-            # [revise_2]
-            self.ent_encoder = BertLayer(hidden_size=str_dim, num_attention_head=num_head, intermediate_size=dim_hid,
-                                         hidden_layers=num_layer_enc_ent)
-        else:
-            raise NotImplementedError
-
+        ent_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
+                                                       dropout=dropout, batch_first=True)
+        self.ent_encoder = nn.TransformerEncoder(ent_encoder_layer, num_layers=num_layer_enc_ent)
         rel_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
                                                        dropout=dropout, batch_first=True)
         self.rel_encoder = nn.TransformerEncoder(rel_encoder_layer, num_layers=num_layer_enc_rel)
-
-        if args.fusion_decoder == 'Transformer':
-            decoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
-                                                       dropout=dropout, batch_first=True)
-            self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=num_layer_dec)
-        elif args.fusion_decoder == 'Mamba':
-            # [revise_1]
-            self.decoder = Mamba(d_model=str_dim, d_state=64, d_conv=4, expand=2)
-        elif args.fusion_decoder == 'BertLayer':
-            # [revise_2]
-            self.ent_encoder = BertLayer(hidden_size=str_dim, num_attention_head=num_head, intermediate_size=dim_hid,
-                                         hidden_layers=num_layer_enc_ent)
-        else:
-            raise NotImplementedError
+        decoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
+                                                   dropout=dropout, batch_first=True)
+        self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=num_layer_dec)
 
         self.contrastive = ContrastiveLoss()
         self.num_visual_token = visual_ent_mask.shape[1]
@@ -150,16 +124,7 @@ class MyGo(nn.Module):
         rep_ent_textual = self.textual_drop(
             self.textual_ln(self.proj_ent_textual(ent_textual_token))) + self.pos_textual_ent
         ent_seq = torch.cat([ent_token, rep_ent_str, rep_ent_visual, rep_ent_textual], dim=1)
-
-        if self.args.ent_fusion == 'Transformer':
-            ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)[:, 0]
-        elif self.args.ent_fusion == 'Mamba':
-            ent_embs = self.ent_encoder(ent_seq)[:, 0]
-        elif self.args.ent_fusion == 'BertLayer':
-            ent_embs = self.ent_encoder(ent_seq)[0][:, 0]
-        else:
-            raise NotImplementedError
-
+        ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)[:, 0]
         rel_embs = self.str_drop(self.str_ln(self.rel_emb)).squeeze(1)
         return torch.cat([ent_embs, self.lp_token], dim=0), rel_embs
 
@@ -204,11 +169,7 @@ class MyGo(nn.Module):
         rep_ent_textual_token = self.textual_drop(
             self.textual_ln(self.proj_ent_textual(ent_textual_token))) + self.pos_textual_ent
         ent_seq = torch.cat([ent_token, rep_ent_str, rep_ent_visual_token, rep_ent_textual_token], dim=1)
-
-        # [revise]
         ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)  # [batch_size, 4, str_dim]
-        # ent_embs = self.ent_encoder(ent_seq)  # [batch_size, 4, str_dim]
-
         emb_ent2 = torch.cat([ent_embs[:, 0], self.lp_token], dim=0)
         emb_ent3 = torch.cat([torch.mean(ent_embs, dim=1), self.lp_token], dim=0)
         emb_ent4 = torch.cat([torch.mean(ent_embs[:, 2:2 + self.num_visual_token], dim=1), self.lp_token],

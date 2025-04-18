@@ -56,10 +56,9 @@ def window_reverse(windows, window_size, H, W):
 
 
 class DropPath(nn.Module):
-    def __init__(self, drop_prob=None, training=False):
+    def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
-        self.training = training
 
     def forward(self, x):
         x = drop_path(x, self.drop_prob, self.training)
@@ -311,6 +310,7 @@ class SwinTransformerBlock(nn.Module):
 
         # FFN
         x = x.view(B, H * W, C)
+        x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -353,8 +353,8 @@ class BasicLayer(nn.Module):
         :return:
         """
         # padding
-        Hp = int(np.ceil(H / self.window_size) * self.window_size)
-        Wp = int(np.ceil(W / self.window_size) * self.window_size)
+        Hp = int(np.ceil(H / self.window_size)) * self.window_size
+        Wp = int(np.ceil(W / self.window_size)) * self.window_size
         # mask
         img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)
         h_slices = (slice(0, -self.window_size),
@@ -461,6 +461,7 @@ class SwinTransformer(nn.Module):
 """
     代码可复现
 """
+torch.cuda.set_device(1)
 random.seed(0)
 np.random.seed(0)
 torch.manual_seed(0)
@@ -472,7 +473,7 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
 if __name__ == '__main__':
-    model = SwinTransformer(in_chans=3,
+    model = SwinTransformer(in_channels=3,
                             patch_size=4,
                             window_size=7,
                             embed_dim=96,

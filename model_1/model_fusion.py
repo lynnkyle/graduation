@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 from model_new import Tucker, ContrastiveLoss
+from fusion.swim_transformer import SwinTransformer
+import numpy as np
 
 
 class MyGo(nn.Module):
@@ -80,11 +82,9 @@ class MyGo(nn.Module):
         ent_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
                                                        dropout=dropout, batch_first=True)
         self.ent_encoder = nn.TransformerEncoder(ent_encoder_layer, num_layers=num_layer_enc_ent)
-
         rel_encoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
                                                        dropout=dropout, batch_first=True)
         self.rel_encoder = nn.TransformerEncoder(rel_encoder_layer, num_layers=num_layer_enc_rel)
-
         decoder_layer = nn.TransformerEncoderLayer(d_model=str_dim, nhead=num_head, dim_feedforward=dim_hid,
                                                    dropout=dropout, batch_first=True)
         self.decoder = nn.TransformerEncoder(decoder_layer, num_layers=num_layer_dec)
@@ -95,6 +95,27 @@ class MyGo(nn.Module):
             self.tucker_decoder = Tucker(str_dim, str_dim)
         else:
             pass
+
+        # [!!!important] 2D fusion
+        # str_dim=256
+        # visual_dim=32
+        # textual_dim=768
+        self.proj_ent_str_2d_1 = nn.Linear(str_dim, 1024)
+        self.proj_ent_str_2d_2 = nn.Linear(str_dim, 1024)
+        self.str_ln_2d_1 = nn.LayerNorm(1024)
+        self.str_drop_2d_1 = nn.Dropout(0.3)
+        self.str_ln_2d_2 = nn.LayerNorm(1024)
+        self.str_drop_2d_2 = nn.Dropout(0.3)
+        self.proj_ent_visual_2d = nn.Linear(self.visual_dim, 256)
+        self.visual_ln_2d = nn.LayerNorm(256)
+        self.visual_drop_2d = nn.Dropout(0.3)
+        self.proj_ent_textual_2d = nn.Linear(self.textual_dim, 256)
+        self.textual_ln_2d = nn.LayerNorm(256)
+        self.textual_drop_2d = nn.Dropout(0.1)
+        self.swim_transformer = SwinTransformer(patch_size=4, in_channels=4, num_classes=-1, embed_dim=96,
+                                                window_size=4)
+
+        # init_weight
         self.init_weights()
 
     def init_weights(self):
@@ -117,7 +138,29 @@ class MyGo(nn.Module):
         # self.proj_ent_visual.bias.data.zero_()
         # self.proj_ent_textual.bias.data.zero_()
 
+    def create2DFusion(self, ent_emb, ent_visual_token, ent_textual_token):
+        ent_emb_matrix_1 = self.str_drop_2d_1(self.str_ln_2d_1(self.proj_ent_str_2d_1(ent_emb)))
+        ent_emb_matrix_1 = ent_emb_matrix_1.view(-1, 4, 16, 16).contiguous()
+        print(ent_emb_matrix_1.shape)
+        ent_emb_matrix_2 = self.str_drop_2d_2(self.str_ln_2d_2(self.proj_ent_str_2d_2(ent_emb)))
+        ent_emb_matrix_2 = ent_emb_matrix_2.view(-1, 4, 16, 16).contiguous()
+        print(ent_emb_matrix_2.shape)
+        visual_emb_matrix = self.visual_drop_2d(self.visual_ln_2d(self.proj_ent_visual_2d(ent_visual_token)))
+        visual_emb_matrix = visual_emb_matrix.view(-1, 4, 16, 16).contiguous()
+        print(visual_emb_matrix.shape)
+        textual_emb_matrix = self.textual_drop_2d(self.textual_ln_2d(self.proj_ent_textual_2d(ent_textual_token)))
+        textual_emb_matrix = textual_emb_matrix.view(-1, 4, 16, 16).contiguous()
+        print(textual_emb_matrix.shape)
+        ent_emb_matrix = torch.cat((ent_emb_matrix_1, ent_emb_matrix_2), dim=-2)
+        ent_modal_matrix = torch.cat((visual_emb_matrix, textual_emb_matrix), dim=-2)
+        matrix = torch.cat((ent_emb_matrix, ent_modal_matrix), dim=-1)
+        print(matrix.shape)
+        x = self.swim_transformer(matrix)
+        print(x.shape)
+        return None
+
     def forward(self):
+        # 1D fusion
         ent_token = self.ent_token.tile(self.num_ent, 1, 1)
         rep_ent_str = self.str_drop(self.str_ln(self.ent_emb)) + self.pos_str_ent
         ent_visual_token = self.visual_token_embed(self.visual_token_index)
@@ -126,12 +169,10 @@ class MyGo(nn.Module):
         rep_ent_textual = self.textual_drop(
             self.textual_ln(self.proj_ent_textual(ent_textual_token))) + self.pos_textual_ent
         ent_seq = torch.cat([ent_token, rep_ent_str, rep_ent_visual, rep_ent_textual], dim=1)
-
-        # [revise]
-        # ent_embs = self.ent_encoder(ent_seq)[:, 0]
         ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)[:, 0]
-
         rel_embs = self.str_drop(self.str_ln(self.rel_emb)).squeeze(1)
+        # [!!!important] 2D fusion
+        matrix = self.create2DFusion(self.ent_emb, ent_visual_token, ent_textual_token)
         return torch.cat([ent_embs, self.lp_token], dim=0), rel_embs
 
     def score(self, triples, emb_ent, emb_rel):
@@ -175,11 +216,7 @@ class MyGo(nn.Module):
         rep_ent_textual_token = self.textual_drop(
             self.textual_ln(self.proj_ent_textual(ent_textual_token))) + self.pos_textual_ent
         ent_seq = torch.cat([ent_token, rep_ent_str, rep_ent_visual_token, rep_ent_textual_token], dim=1)
-
-        # [revise]
-        # ent_embs = self.ent_encoder(ent_seq)  # [batch_size, 4, str_dim]
         ent_embs = self.ent_encoder(ent_seq, src_key_padding_mask=self.ent_mask)  # [batch_size, 4, str_dim]
-
         emb_ent2 = torch.cat([ent_embs[:, 0], self.lp_token], dim=0)
         emb_ent3 = torch.cat([torch.mean(ent_embs, dim=1), self.lp_token], dim=0)
         emb_ent4 = torch.cat([torch.mean(ent_embs[:, 2:2 + self.num_visual_token], dim=1), self.lp_token],
