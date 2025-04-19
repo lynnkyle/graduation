@@ -34,9 +34,9 @@ class MyGo(nn.Module):
         else:
             raise NotImplementedError
 
-        self.visual_token_index = visual_token_index
+        self.visual_token_index = visual_token_index  # [12842, 4]
         self.visual_token_embed = nn.Embedding.from_pretrained(visual_tokens).requires_grad_(False)
-        self.textual_token_index = textual_token_index
+        self.textual_token_index = textual_token_index  # [12842, 4]
         self.textual_token_embed = nn.Embedding.from_pretrained(textual_tokens).requires_grad_(False)
         self.visual_token_embed.requires_grad_(False)
         self.textual_token_embed.requires_grad_(False)
@@ -54,8 +54,8 @@ class MyGo(nn.Module):
         self.ent_token = nn.Parameter(torch.Tensor(1, 1, str_dim))  # [1, 1, str_dim] -> [batch_size, 1, str_dim]
         self.rel_token = nn.Parameter(torch.Tensor(1, 1, str_dim))  # [1, 1, str_dim] -> [batch_size, 1, str_dim]
         self.ent_emb = nn.Parameter(torch.Tensor(num_ent, 1, str_dim))
-        self.rel_emb = nn.Parameter(torch.Tensor(num_rel, 1, str_dim))
         self.lp_token = nn.Parameter(torch.Tensor(1, str_dim))
+        self.rel_emb = nn.Parameter(torch.Tensor(num_rel, 1, str_dim))
 
         self.str_ln = nn.LayerNorm(str_dim)
         self.str_rel_ln = nn.LayerNorm(str_dim)
@@ -163,18 +163,16 @@ class MyGo(nn.Module):
         rel_embs = self.str_rel_drop_2d(self.str_rel_ln_2d(self.proj_rel_str_2d())).squeeze(1)
         return torch.cat([ent_embs, self.lp_token], dim=0), rel_embs
 
-    def encoder2DFusion(self):
-        ent_emb_matrix_1 = self.str_drop_2d_1(self.str_ln_2d_1(self.proj_ent_str_2d_1(self.ent_emb)))
+    def encoder2DFusion(self, emb_ent, emb_rel, ent_visual_token, ent_textual_token):
+        ent_emb_matrix_1 = self.str_drop_2d_1(self.str_ln_2d_1(self.proj_ent_str_2d_1(emb_ent)))
         ent_emb_matrix_1 = ent_emb_matrix_1.view(-1, 4, 16, 16).contiguous()  # [12842, 4, 16, 16]
         # print(ent_emb_matrix_1.shape)
-        ent_emb_matrix_2 = self.str_drop_2d_2(self.str_ln_2d_2(self.proj_ent_str_2d_2(self.ent_emb)))
+        ent_emb_matrix_2 = self.str_drop_2d_2(self.str_ln_2d_2(self.proj_ent_str_2d_2(emb_ent)))
         ent_emb_matrix_2 = ent_emb_matrix_2.view(-1, 4, 16, 16).contiguous()  # [12842, 4, 16, 16]
         # print(ent_emb_matrix_2.shape)
-        ent_visual_token = self.visual_token_embed(self.visual_token_index)
         visual_emb_matrix = self.visual_drop_2d(self.visual_ln_2d(self.proj_ent_visual_2d(ent_visual_token)))
         visual_emb_matrix = visual_emb_matrix.view(-1, 4, 16, 16).contiguous()  # [12842, 4, 16, 16]
         # print(visual_emb_matrix.shape)
-        ent_textual_token = self.textual_token_embed(self.textual_token_index)
         textual_emb_matrix = self.textual_drop_2d(self.textual_ln_2d(self.proj_ent_textual_2d(ent_textual_token)))
         textual_emb_matrix = textual_emb_matrix.view(-1, 4, 16, 16).contiguous()  # [12842, 4, 16, 16]
         # print(textual_emb_matrix.shape)
@@ -182,18 +180,22 @@ class MyGo(nn.Module):
         ent_modal_matrix = torch.cat((visual_emb_matrix, textual_emb_matrix), dim=-2)
         matrix = torch.cat((ent_emb_matrix, ent_modal_matrix), dim=-1)  # [12842, 4, 32, 32]
         # print(matrix.shape)
-        chunk_size = 4
-        chunks = matrix.split(chunk_size, dim=0)
-        ent_embs = []  # [12842, 768]
-        for chunk in chunks:
-            ent_embs.append(self.swim_transformer(chunk))
-        ent_embs = torch.cat(ent_embs, dim=0)
+        ent_embs = self.swim_transformer(matrix)
         # print(ent_embs.shape)
-        rel_embs = self.str_rel_drop_2d(self.str_rel_ln_2d(self.proj_rel_str_2d(self.rel_emb))).squeeze(1)
+        rel_embs = self.str_rel_drop_2d(self.str_rel_ln_2d(self.proj_rel_str_2d(emb_rel))).squeeze(1)
         return torch.cat([ent_embs, self.lp_token_2d], dim=0), rel_embs
 
-    def forward(self):
-        return self.encoder2DFusion()
+    def forward(self, triples):
+        h_seq_idx = triples[:, 0] - self.num_rel
+        t_seq_idx = triples[:, 2] - self.num_rel
+        ent_idx = torch.where(h_seq_idx == self.num_ent, t_seq_idx, h_seq_idx)
+        emb_ent = self.ent_emb[ent_idx]
+        emb_rel = self.rel_emb[triples[:, 1] - self.num_ent]
+        visual_token_idx = self.visual_token_index[ent_idx]
+        ent_visual_token = self.visual_token_embed(visual_token_idx)
+        textual_token_idx = self.textual_token_index[ent_idx]
+        ent_textual_token = self.textual_token_embed(textual_token_idx)
+        return self.encoder2DFusion(emb_ent, emb_rel, ent_visual_token, ent_textual_token)
 
     def score(self, triples, emb_ent, emb_rel):
         """

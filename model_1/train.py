@@ -42,7 +42,7 @@ torch.backends.cudnn.benchmark = False
 torch.cuda.set_device(0)
 parser = argparse.ArgumentParser()
 parser.add_argument('--data', type=str, default='DB15K')
-parser.add_argument('--batch_size', type=int, default=2048)
+parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--model', type=str, default='MyGo')
 parser.add_argument('--device', type=str, default='cuda:1')
 parser.add_argument('--num_epoch', type=int, default=1500)
@@ -126,7 +126,7 @@ def train_one_epoch(model, optimizer):
     loss_fn = torch.nn.CrossEntropyLoss()
     for batch, label in kg_loader:
         # for batch, label in tqdm(kg_loader):
-        ent_embs, rel_embs = model()
+        ent_embs, rel_embs = model(batch.cuda())
         score = model.score(batch.cuda(), ent_embs, rel_embs)
         loss = loss_fn(score, label.cuda())
         if args.mu != 0:

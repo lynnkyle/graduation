@@ -93,3 +93,9 @@ chunk_size = 1024
 chunks = matrix.split(chunk_size, dim=0)
 print(len(chunks))
 print(len(chunks[12]))
+
+# torch.where
+x = torch.tensor([0, 100, 1, 100, 2])
+y = torch.tensor([100, 3, 100, 4, 100])
+z = torch.where(x == 100, y, x)
+print(z)
