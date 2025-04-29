@@ -480,6 +480,13 @@ if __name__ == '__main__':
                             depths=(2, 2, 6, 2),
                             num_heads=(2, 4, 8, 2),
                             num_classes=5)
+    # self.swin_encoder = SwinTransformer(in_channels=1,
+    #                                     patch_size=4,
+    #                                     window_size=7,
+    #                                     embed_dim=64,
+    #                                     depths=(2,),
+    #                                     num_heads=(4,),
+    #                                     num_classes=-1)
     x = torch.randn(12846, 1, 16, 16)
     y = model(x)
     print(y)
