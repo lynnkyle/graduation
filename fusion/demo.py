@@ -99,3 +99,13 @@ x = torch.tensor([0, 100, 1, 100, 2])
 y = torch.tensor([100, 3, 100, 4, 100])
 z = torch.where(x == 100, y, x)
 print(z)
+
+# F.onehot
+import torch.nn.functional as F
+
+labels = F.one_hot(torch.LongTensor([0, 2, 2, 2, 3, 4]), 10).float()
+print(labels)
+
+x = torch.randn(12846, 256)
+y = torch.randn(12846, 256)
+print(torch.matmul(x, y.transpose(0, 1)))
